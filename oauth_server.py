@@ -3,8 +3,26 @@ import discord
 import config
 import database
 import oauth
+from bot import build_log_embed
 
 routes = web.RouteTableDef()
+
+
+async def update_log_message(bot):
+    """Aggiorna il messaggio di log live (se configurato con /log) con gli
+    ultimi eventi di verifica registrati nel database."""
+    conf = await database.get_log_channel()
+    if not conf or not conf.get("channel_id") or not conf.get("message_id"):
+        return
+    try:
+        channel = bot.get_channel(int(conf["channel_id"]))
+        if not channel:
+            return
+        message = await channel.fetch_message(int(conf["message_id"]))
+        entries = await database.get_recent_verification_log(15)
+        await message.edit(embed=build_log_embed(entries))
+    except Exception as e:
+        print(f"[LOG] Errore aggiornando il pannello di log live: {e}")
 
 
 def get_avatar_url(identity: dict) -> str:
@@ -408,6 +426,10 @@ def create_app(bot):
                 print(f"[VERIFICA] ERRORE: ruolo {guild_conf['verified_role_id']} non trovato nel server {guild_id}")
         else:
             print(f"[VERIFICA] ERRORE: guild {guild_id} non trovata o senza ruolo configurato")
+
+        guild_name = guild.name if guild else f"Server {guild_id}"
+        await database.add_verification_log(user_id, username, guild_id, guild_name)
+        await update_log_message(bot)
 
         avatar_url = get_avatar_url(identity)
 
