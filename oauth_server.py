@@ -1,4 +1,5 @@
 from aiohttp import web
+import discord
 import config
 import database
 import oauth
@@ -46,13 +47,25 @@ def create_app(bot):
         guild = bot.get_guild(int(guild_id))
         guild_conf = await database.get_guild_config(guild_id)
         if guild and guild_conf and guild_conf.get("verified_role_id"):
-            member = guild.get_member(int(user_id))
             role = guild.get_role(int(guild_conf["verified_role_id"]))
+            try:
+                member = await guild.fetch_member(int(user_id))
+            except Exception as e:
+                print(f"[VERIFICA] Impossibile trovare il membro {user_id} nel server {guild_id}: {e}")
+                member = None
             if member and role:
                 try:
                     await member.add_roles(role, reason="Verifica completata")
-                except Exception:
-                    pass
+                    print(f"[VERIFICA] Ruolo assegnato a {username} ({user_id}) nel server {guild_id}")
+                except discord.Forbidden:
+                    print(f"[VERIFICA] ERRORE: il bot non ha i permessi per assegnare il ruolo in {guild_id} "
+                          f"(controlla la gerarchia ruoli e il permesso 'Gestisci Ruoli')")
+                except Exception as e:
+                    print(f"[VERIFICA] ERRORE assegnando ruolo: {e}")
+            elif not role:
+                print(f"[VERIFICA] ERRORE: ruolo {guild_conf['verified_role_id']} non trovato nel server {guild_id}")
+        else:
+            print(f"[VERIFICA] ERRORE: guild {guild_id} non trovata o senza ruolo configurato")
 
         return web.Response(
             text="✅ Verifica completata! Puoi tornare su Discord.",
