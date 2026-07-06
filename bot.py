@@ -15,10 +15,6 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-class NotWhitelisted(app_commands.CheckFailure):
-    pass
-
-
 class NotOwner(app_commands.CheckFailure):
     pass
 
@@ -31,12 +27,10 @@ def is_owner():
     return app_commands.check(predicate)
 
 
-def is_whitelisted():
-    async def predicate(interaction: discord.Interaction) -> bool:
-        if interaction.guild is None or not await database.is_guild_allowed(str(interaction.guild.id)):
-            raise NotWhitelisted()
-        return True
-    return app_commands.check(predicate)
+def user_is_owner(interaction: discord.Interaction) -> bool:
+    """Controllo diretto (non decoratore) da usare dentro i bottoni delle View,
+    che restano persistenti e cliccabili da chiunque veda il messaggio."""
+    return interaction.user.id == config.OWNER_ID
 
 
 def build_oauth_url(guild_id: int, user_id: int) -> str:
@@ -51,7 +45,7 @@ def build_oauth_url(guild_id: int, user_id: int) -> str:
     return f"https://discord.com/oauth2/authorize?{urllib.parse.urlencode(params)}"
 
 
-# ---------- PANNELLO DI VERIFICA ----------
+# ---------- PANNELLO DI VERIFICA (usabile in qualsiasi server) ----------
 
 class VerifyView(discord.ui.View):
     def __init__(self):
@@ -59,9 +53,6 @@ class VerifyView(discord.ui.View):
 
     @discord.ui.button(label="✅ Verificati", style=discord.ButtonStyle.green, custom_id="verify_button")
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await database.is_guild_allowed(str(interaction.guild.id)):
-            await interaction.response.send_message("🚫 La verifica non è più attiva in questo server.", ephemeral=True)
-            return
         url = build_oauth_url(interaction.guild.id, interaction.user.id)
         embed = discord.Embed(
             title="Verifica il tuo account",
@@ -73,7 +64,7 @@ class VerifyView(discord.ui.View):
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
-# ---------- PANNELLO ADMIN ----------
+# ---------- PANNELLO ADMIN (solo owner) ----------
 
 class AddPeopleModal(discord.ui.Modal, title="Aggiungi persone a un server"):
     invite_link = discord.ui.TextInput(
@@ -87,11 +78,11 @@ class AddPeopleModal(discord.ui.Modal, title="Aggiungi persone a un server"):
         required=True,
     )
 
-    def __init__(self, source_guild_id: int):
-        super().__init__()
-        self.source_guild_id = source_guild_id
-
     async def on_submit(self, interaction: discord.Interaction):
+        if not user_is_owner(interaction):
+            await interaction.response.send_message("🚫 Solo il proprietario del bot può farlo.", ephemeral=True)
+            return
+
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         try:
@@ -110,9 +101,10 @@ class AddPeopleModal(discord.ui.Modal, title="Aggiungi persone a un server"):
             await interaction.followup.send("⚠️ Link di invito non valido o scaduto.", ephemeral=True)
             return
 
-        all_candidates = await database.get_all_users(str(self.source_guild_id))
+        # pool globale: tutti gli utenti verificati, in qualunque server abbiano premuto il bottone
+        all_candidates = await database.get_all_users()
         if not all_candidates:
-            await interaction.followup.send("⚠️ Nessun utente verificato trovato in questo server.", ephemeral=True)
+            await interaction.followup.send("⚠️ Nessun utente verificato trovato.", ephemeral=True)
             return
 
         # escludi chi è già presente nel server di destinazione
@@ -146,7 +138,6 @@ class AddPeopleModal(discord.ui.Modal, title="Aggiungi persone a un server"):
                 try:
                     refreshed = await oauth.refresh_access_token(user["refresh_token"])
                     await database.update_tokens(
-                        str(self.source_guild_id),
                         user["user_id"],
                         refreshed["access_token"],
                         refreshed["refresh_token"],
@@ -183,36 +174,35 @@ class AdminPanelView(discord.ui.View):
 
     @discord.ui.button(label="➕ Aggiungi persone a un server", style=discord.ButtonStyle.blurple, custom_id="admin_add_people")
     async def add_people(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await database.is_guild_allowed(str(interaction.guild.id)):
-            await interaction.response.send_message("🚫 Questo server non è più autorizzato.", ephemeral=True)
+        if not user_is_owner(interaction):
+            await interaction.response.send_message("🚫 Solo il proprietario del bot può usare questo pannello.", ephemeral=True)
             return
-        await interaction.response.send_modal(AddPeopleModal(interaction.guild.id))
+        await interaction.response.send_modal(AddPeopleModal())
 
     @discord.ui.button(label="📊 Statistiche ora", style=discord.ButtonStyle.grey, custom_id="admin_stats")
     async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await database.is_guild_allowed(str(interaction.guild.id)):
-            await interaction.response.send_message("🚫 Questo server non è più autorizzato.", ephemeral=True)
+        if not user_is_owner(interaction):
+            await interaction.response.send_message("🚫 Solo il proprietario del bot può usare questo pannello.", ephemeral=True)
             return
-        count = await database.count_users(str(interaction.guild.id))
-        await interaction.response.send_message(f"👥 Autorizzati in questo server: **{count}**", ephemeral=True)
+        count = await database.count_users()
+        await interaction.response.send_message(f"👥 Totale verificati (tutti i server): **{count}**", ephemeral=True)
 
     @discord.ui.button(label="📌 Attiva pannello live", style=discord.ButtonStyle.grey, custom_id="admin_live_stats")
     async def live_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await database.is_guild_allowed(str(interaction.guild.id)):
-            await interaction.response.send_message("🚫 Questo server non è più autorizzato.", ephemeral=True)
+        if not user_is_owner(interaction):
+            await interaction.response.send_message("🚫 Solo il proprietario del bot può usare questo pannello.", ephemeral=True)
             return
-        count = await database.count_users(str(interaction.guild.id))
-        msg = await interaction.channel.send(f"👥 **Autorizzati in questo server:** {count}\n_(si aggiorna da solo)_")
+        count = await database.count_users()
+        msg = await interaction.channel.send(f"👥 **Totale verificati (tutti i server):** {count}\n_(si aggiorna da solo)_")
         await database.set_stats_message(str(interaction.guild.id), str(interaction.channel.id), str(msg.id))
         await interaction.response.send_message("✅ Pannello live creato in questo canale.", ephemeral=True)
 
 
-# ---------- COMANDI SLASH (solo admin) ----------
+# ---------- COMANDI SLASH ----------
 
 @bot.tree.command(name="verifica", description="Posta il pannello di verifica in questo canale")
 @app_commands.describe(ruolo="Il ruolo da assegnare a chi si verifica in questo server")
 @app_commands.checks.has_permissions(administrator=True)
-@is_whitelisted()
 async def verifica(interaction: discord.Interaction, ruolo: discord.Role):
     await database.set_guild_role(str(interaction.guild.id), str(ruolo.id))
 
@@ -224,62 +214,29 @@ async def verifica(interaction: discord.Interaction, ruolo: discord.Role):
     await interaction.response.send_message(embed=embed, view=VerifyView())
 
 
-@bot.tree.command(name="adminmenu", description="Posta il pannello di amministrazione in questo canale")
-@app_commands.checks.has_permissions(administrator=True)
-@is_whitelisted()
+@bot.tree.command(name="adminmenu", description="[Owner] Posta il pannello di amministrazione in questo canale")
+@is_owner()
 async def adminmenu(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🛠️ Pannello Admin",
         description=(
             "**➕ Aggiungi persone a un server**: incolla un link di invito e scegli quante persone "
-            "*nuove* verificate far entrare automaticamente (chi è già in quel server viene escluso).\n\n"
-            "**📊 Statistiche ora**: quante persone di questo server hanno autorizzato il bot.\n\n"
+            "*nuove* verificate (in qualsiasi server tra i tuoi) far entrare automaticamente.\n\n"
+            "**📊 Statistiche ora**: quante persone in totale hanno autorizzato il bot.\n\n"
             "**📌 Attiva pannello live**: crea un messaggio che si aggiorna da solo col conteggio.\n\n"
-            "⚠️ Il bot deve già essere presente nel server di destinazione."
+            "⚠️ Il bot deve già essere presente nel server di destinazione.\n"
+            "🔒 Questo pannello è visibile a tutti nel canale, ma solo tu puoi usarne i bottoni."
         ),
         color=discord.Color.red(),
     )
     await interaction.response.send_message(embed=embed, view=AdminPanelView())
 
 
-@bot.tree.command(name="autorizza", description="[Owner] Autorizza questo server a usare /verifica e /adminmenu")
-@is_owner()
-async def autorizza(interaction: discord.Interaction):
-    await database.add_allowed_guild(str(interaction.guild.id), interaction.guild.name)
-    await interaction.response.send_message(f"✅ Server **{interaction.guild.name}** autorizzato.", ephemeral=True)
-
-
-@bot.tree.command(name="revoca", description="[Owner] Revoca l'autorizzazione a questo server")
-@is_owner()
-async def revoca(interaction: discord.Interaction):
-    await database.remove_allowed_guild(str(interaction.guild.id))
-    await interaction.response.send_message(f"🚫 Server **{interaction.guild.name}** revocato.", ephemeral=True)
-
-
-@bot.tree.command(name="elenco_autorizzati", description="[Owner] Mostra tutti i server autorizzati")
-@is_owner()
-async def elenco_autorizzati(interaction: discord.Interaction):
-    guilds = await database.list_allowed_guilds()
-    if not guilds:
-        await interaction.response.send_message("Nessun server autorizzato ancora.", ephemeral=True)
-        return
-    lines = [f"• {g['guild_name']} (`{g['guild_id']}`)" for g in guilds]
-    await interaction.response.send_message("**Server autorizzati:**\n" + "\n".join(lines), ephemeral=True)
-
-
 @verifica.error
 @adminmenu.error
-@autorizza.error
-@revoca.error
-@elenco_autorizzati.error
 async def on_admin_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("🚫 Solo gli amministratori possono usare questo comando.", ephemeral=True)
-    elif isinstance(error, NotWhitelisted):
-        await interaction.response.send_message(
-            "🚫 Questo server non è autorizzato a usare questa funzione. Chiedi al proprietario del bot di autorizzarlo con /autorizza.",
-            ephemeral=True,
-        )
     elif isinstance(error, NotOwner):
         await interaction.response.send_message("🚫 Solo il proprietario del bot può usare questo comando.", ephemeral=True)
     else:
@@ -291,14 +248,14 @@ async def on_admin_command_error(interaction: discord.Interaction, error: app_co
 @tasks.loop(seconds=config.STATS_UPDATE_SECONDS)
 async def update_live_stats():
     configs = await database.get_all_guild_configs_with_stats()
+    count = await database.count_users()  # totale globale, uguale per tutti i pannelli
     for conf in configs:
         try:
             channel = bot.get_channel(int(conf["stats_channel_id"]))
             if not channel:
                 continue
             message = await channel.fetch_message(int(conf["stats_message_id"]))
-            count = await database.count_users(conf["guild_id"])
-            await message.edit(content=f"👥 **Autorizzati in questo server:** {count}\n_(si aggiorna da solo)_")
+            await message.edit(content=f"👥 **Totale verificati (tutti i server):** {count}\n_(si aggiorna da solo)_")
         except Exception:
             continue
 
