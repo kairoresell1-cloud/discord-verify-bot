@@ -18,6 +18,31 @@ async def init_db():
             """
         )
 
+        # Configurazione GLOBALE del canale di log live (uno solo, per tutto il bot)
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS log_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                channel_id TEXT,
+                message_id TEXT
+            )
+            """
+        )
+
+        # Storico delle verifiche, usato per popolare il pannello di log live
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS verification_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                username TEXT,
+                guild_id TEXT,
+                guild_name TEXT,
+                verified_at REAL
+            )
+            """
+        )
+
         # Tabella GLOBALE degli utenti verificati: chi si verifica in più
         # server diversi viene contato una sola volta (user_id è la chiave).
         await db.execute(
@@ -190,3 +215,50 @@ async def count_users():
         cur = await db.execute("SELECT COUNT(*) FROM verified_users")
         row = await cur.fetchone()
         return row[0]
+
+
+# ---------- LOG LIVE DELLE VERIFICHE (globale, un solo canale/messaggio) ----------
+
+async def set_log_channel(channel_id: str, message_id: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO log_config (id, channel_id, message_id)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                channel_id=excluded.channel_id,
+                message_id=excluded.message_id
+            """,
+            (channel_id, message_id),
+        )
+        await db.commit()
+
+
+async def get_log_channel():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM log_config WHERE id=1")
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def add_verification_log(user_id: str, username: str, guild_id: str, guild_name: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO verification_log (user_id, username, guild_id, guild_name, verified_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, username, guild_id, guild_name, time.time()),
+        )
+        await db.commit()
+
+
+async def get_recent_verification_log(limit: int = 15):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM verification_log ORDER BY id DESC LIMIT ?", (limit,)
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
