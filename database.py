@@ -1,7 +1,6 @@
 import os
 import aiosqlite
 import time
-import random
 
 DB_PATH = os.getenv("DB_PATH", "verified_users.db")
 
@@ -18,69 +17,86 @@ async def init_db():
             )
             """
         )
-        await db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS allowed_guilds (
-                guild_id TEXT PRIMARY KEY,
-                guild_name TEXT,
-                authorized_at REAL
-            )
-            """
-        )
+
+        # Tabella GLOBALE degli utenti verificati: chi si verifica in più
+        # server diversi viene contato una sola volta (user_id è la chiave).
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS verified_users (
-                guild_id TEXT NOT NULL,
-                user_id TEXT NOT NULL,
+                user_id TEXT PRIMARY KEY,
                 username TEXT,
                 access_token TEXT NOT NULL,
                 refresh_token TEXT NOT NULL,
                 expires_at REAL NOT NULL,
                 verified_at REAL NOT NULL,
-                PRIMARY KEY (guild_id, user_id)
+                first_guild_id TEXT
             )
             """
         )
         await db.commit()
 
+    await _migrate_old_schema_if_needed()
 
-# ---------- WHITELIST SERVER AUTORIZZATI ----------
 
-async def add_allowed_guild(guild_id: str, guild_name: str):
+async def _migrate_old_schema_if_needed():
+    """Se il DB ha ancora il vecchio schema (chiave composta guild_id+user_id,
+    quindi lo stesso utente contato più volte se verificato in più server),
+    lo migra automaticamente al nuovo schema globale, unificando i duplicati
+    e tenendo per ciascun utente il record più recente."""
     async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("PRAGMA table_info(verified_users)")
+        cols = [row[1] for row in await cur.fetchall()]
+
+        if "guild_id" not in cols:
+            return  # schema già aggiornato, niente da fare
+
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM verified_users ORDER BY verified_at ASC")
+        old_rows = [dict(r) for r in await cur.fetchall()]
+
+        await db.execute("ALTER TABLE verified_users RENAME TO verified_users_old")
         await db.execute(
             """
-            INSERT INTO allowed_guilds (guild_id, guild_name, authorized_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET guild_name=excluded.guild_name
-            """,
-            (guild_id, guild_name, time.time()),
+            CREATE TABLE verified_users (
+                user_id TEXT PRIMARY KEY,
+                username TEXT,
+                access_token TEXT NOT NULL,
+                refresh_token TEXT NOT NULL,
+                expires_at REAL NOT NULL,
+                verified_at REAL NOT NULL,
+                first_guild_id TEXT
+            )
+            """
         )
+
+        merged = {}
+        for row in old_rows:
+            uid = row["user_id"]
+            if uid not in merged:
+                row["first_guild_id"] = row["guild_id"]
+                merged[uid] = row
+            elif row["verified_at"] >= merged[uid]["verified_at"]:
+                first_guild = merged[uid]["first_guild_id"]
+                row["first_guild_id"] = first_guild
+                merged[uid] = row
+
+        for uid, row in merged.items():
+            await db.execute(
+                """
+                INSERT INTO verified_users
+                    (user_id, username, access_token, refresh_token, expires_at, verified_at, first_guild_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (uid, row["username"], row["access_token"], row["refresh_token"],
+                 row["expires_at"], row["verified_at"], row["first_guild_id"]),
+            )
+
+        await db.execute("DROP TABLE verified_users_old")
         await db.commit()
+        print(f"[MIGRAZIONE] {len(old_rows)} record uniti in {len(merged)} utenti globali unici.")
 
 
-async def remove_allowed_guild(guild_id: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM allowed_guilds WHERE guild_id=?", (guild_id,))
-        await db.commit()
-
-
-async def is_guild_allowed(guild_id: str) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT 1 FROM allowed_guilds WHERE guild_id=?", (guild_id,))
-        row = await cur.fetchone()
-        return row is not None
-
-
-async def list_allowed_guilds():
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT * FROM allowed_guilds ORDER BY authorized_at")
-        rows = await cur.fetchall()
-        return [dict(r) for r in rows]
-
-
-# ---------- CONFIGURAZIONE PER SERVER ----------
+# ---------- CONFIGURAZIONE PER SERVER (ruolo verifica, pannello live stats) ----------
 
 async def set_guild_role(guild_id: str, role_id: str):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -128,47 +144,49 @@ async def get_all_guild_configs_with_stats():
         return [dict(r) for r in rows]
 
 
-# ---------- UTENTI VERIFICATI (per server) ----------
+# ---------- UTENTI VERIFICATI (GLOBALI: contano una volta sola in totale) ----------
 
-async def save_user(guild_id: str, user_id: str, username: str, access_token: str, refresh_token: str, expires_in: int):
+async def save_user(user_id: str, username: str, access_token: str, refresh_token: str,
+                     expires_in: int, guild_id: str = None):
     expires_at = time.time() + expires_in
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
-            INSERT INTO verified_users (guild_id, user_id, username, access_token, refresh_token, expires_at, verified_at)
+            INSERT INTO verified_users
+                (user_id, username, access_token, refresh_token, expires_at, verified_at, first_guild_id)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+            ON CONFLICT(user_id) DO UPDATE SET
                 username=excluded.username,
                 access_token=excluded.access_token,
                 refresh_token=excluded.refresh_token,
                 expires_at=excluded.expires_at,
                 verified_at=excluded.verified_at
             """,
-            (guild_id, user_id, username, access_token, refresh_token, expires_at, time.time()),
+            (user_id, username, access_token, refresh_token, expires_at, time.time(), guild_id),
         )
         await db.commit()
 
 
-async def update_tokens(guild_id: str, user_id: str, access_token: str, refresh_token: str, expires_in: int):
+async def update_tokens(user_id: str, access_token: str, refresh_token: str, expires_in: int):
     expires_at = time.time() + expires_in
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE verified_users SET access_token=?, refresh_token=?, expires_at=? WHERE guild_id=? AND user_id=?",
-            (access_token, refresh_token, expires_at, guild_id, user_id),
+            "UPDATE verified_users SET access_token=?, refresh_token=?, expires_at=? WHERE user_id=?",
+            (access_token, refresh_token, expires_at, user_id),
         )
         await db.commit()
 
 
-async def get_all_users(guild_id: str):
+async def get_all_users():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT * FROM verified_users WHERE guild_id=?", (guild_id,))
+        cur = await db.execute("SELECT * FROM verified_users")
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
 
-async def count_users(guild_id: str):
+async def count_users():
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT COUNT(*) FROM verified_users WHERE guild_id=?", (guild_id,))
+        cur = await db.execute("SELECT COUNT(*) FROM verified_users")
         row = await cur.fetchone()
         return row[0]
