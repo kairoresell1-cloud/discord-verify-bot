@@ -1,8 +1,9 @@
+import os
 import aiosqlite
 import time
 import random
 
-DB_PATH = "verified_users.db"
+DB_PATH = os.getenv("DB_PATH", "verified_users.db")
 
 
 async def init_db():
