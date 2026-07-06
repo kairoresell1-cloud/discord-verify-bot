@@ -40,7 +40,7 @@ def create_app(bot):
         if user_id != expected_user_id:
             return web.Response(text="Verifica non valida (state mismatch).", status=400)
 
-        await database.save_user(guild_id, user_id, username, access_token, refresh_token, expires_in)
+        await database.save_user(user_id, username, access_token, refresh_token, expires_in, guild_id=guild_id)
 
         # assegna il ruolo verificato nel server dove è stata avviata la verifica
         bot = request.app["bot"]
@@ -82,3 +82,4 @@ async def run_web_server(bot):
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", config.PORT)
     await site.start()
+    
