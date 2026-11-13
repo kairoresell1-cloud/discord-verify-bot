@@ -366,7 +366,8 @@ async def verifica(interaction: discord.Interaction, ruolo: discord.Role):
     if interaction.guild.icon:
         embed.set_thumbnail(url=interaction.guild.icon.url)
     embed.set_footer(text="Clicca il bottone qui sotto per iniziare")
-    await interaction.response.send_message(embed=embed, view=VerifyView())
+    await interaction.channel.send(embed=embed, view=VerifyView())
+    await interaction.response.send_message("✅ Pannello di verifica pubblicato!", ephemeral=True)
 
 
 @bot.tree.command(name="adminmenu", description="[Owner] Posta il pannello di amministrazione in questo canale")

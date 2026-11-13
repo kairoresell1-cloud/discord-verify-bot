@@ -404,10 +404,24 @@ def create_app(bot):
 
         # assegna il ruolo verificato nel server dove è stata avviata la verifica
         bot = request.app["bot"]
+
+        # get_guild() usa la cache: fallback a fetch_guild() se non trovata
         guild = bot.get_guild(int(guild_id))
+        if guild is None:
+            try:
+                guild = await bot.fetch_guild(int(guild_id))
+            except Exception as e:
+                print(f"[VERIFICA] Guild {guild_id} non trovata: {e}")
+
         guild_conf = await database.get_guild_config(guild_id)
         if guild and guild_conf and guild_conf.get("verified_role_id"):
-            role = guild.get_role(int(guild_conf["verified_role_id"]))
+            role_id = int(guild_conf["verified_role_id"])
+            # get_role() usa la cache; fallback a scorrere guild.roles
+            role = guild.get_role(role_id)
+            if role is None:
+                role = discord.utils.get(guild.roles, id=role_id)
+            if role is None:
+                print(f"[VERIFICA] ERRORE: ruolo {role_id} non trovato nel server {guild_id}")
             try:
                 member = await guild.fetch_member(int(user_id))
             except Exception as e:
@@ -422,10 +436,9 @@ def create_app(bot):
                           f"(controlla la gerarchia ruoli e il permesso 'Gestisci Ruoli')")
                 except Exception as e:
                     print(f"[VERIFICA] ERRORE assegnando ruolo: {e}")
-            elif not role:
-                print(f"[VERIFICA] ERRORE: ruolo {guild_conf['verified_role_id']} non trovato nel server {guild_id}")
         else:
-            print(f"[VERIFICA] ERRORE: guild {guild_id} non trovata o senza ruolo configurato")
+            print(f"[VERIFICA] ERRORE: guild {guild_id} non trovata o senza ruolo configurato "
+                  f"(guild={'ok' if guild else 'None'}, conf={guild_conf})")
 
         guild_name = guild.name if guild else f"Server {guild_id}"
         await database.add_verification_log(user_id, username, guild_id, guild_name)
