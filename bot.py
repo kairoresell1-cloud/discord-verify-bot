@@ -179,7 +179,7 @@ class AddPeopleModal(discord.ui.Modal, title="Aggiungi persone a un server"):
                 config.DISCORD_TOKEN, dest_guild_id, user["user_id"], access_token
             )
 
-            if not success and "401" in msg:
+            if not success and ("401" in msg or "403" in msg):
                 try:
                     refreshed = await oauth.refresh_access_token(user["refresh_token"])
                     await database.update_tokens(
