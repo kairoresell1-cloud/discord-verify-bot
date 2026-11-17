@@ -350,6 +350,16 @@ class AdminPanelView(SafeView):
 @app_commands.describe(ruolo="Il ruolo da assegnare a chi si verifica in questo server")
 @app_commands.checks.has_permissions(administrator=True)
 async def verifica(interaction: discord.Interaction, ruolo: discord.Role):
+    # Controlla che il bot abbia i permessi necessari nel canale
+    bot_perms = interaction.channel.permissions_for(interaction.guild.me)
+    if not bot_perms.send_messages or not bot_perms.embed_links:
+        await interaction.response.send_message(
+            "⚠️ Il bot non ha i permessi necessari in questo canale.\n"
+            "Assicurati che il bot abbia i permessi **Invia messaggi** e **Incorpora link**.",
+            ephemeral=True,
+        )
+        return
+
     await database.set_guild_role(str(interaction.guild.id), str(ruolo.id))
 
     embed = discord.Embed(
@@ -366,8 +376,9 @@ async def verifica(interaction: discord.Interaction, ruolo: discord.Role):
     if interaction.guild.icon:
         embed.set_thumbnail(url=interaction.guild.icon.url)
     embed.set_footer(text="Clicca il bottone qui sotto per iniziare")
-    await interaction.channel.send(embed=embed, view=VerifyView())
+    # Rispondi PRIMA all'interazione, poi invia nel canale
     await interaction.response.send_message("✅ Pannello di verifica pubblicato!", ephemeral=True)
+    await interaction.channel.send(embed=embed, view=VerifyView())
 
 
 @bot.tree.command(name="adminmenu", description="[Owner] Posta il pannello di amministrazione in questo canale")
